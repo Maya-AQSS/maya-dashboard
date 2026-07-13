@@ -1,0 +1,18 @@
+# Contexto de build del frontend. NO excluir .npmrc ni package-lock.json:
+# ambos son necesarios para `npm ci` reproducible.
+node_modules
+dist
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+e2e
+coverage
+playwright-report
+test-results
+*.local
+.vscode
+.idea
+Dockerfile*
+README.md

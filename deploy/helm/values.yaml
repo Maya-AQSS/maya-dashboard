@@ -13,7 +13,9 @@ fullnameOverride: ""
 
 # ─── Imágenes ───────────────────────────────────────────────────────────────
 image:
-  registry: gitea.ceedcv.es          # registry OCI interno (Gitea)
+  # Registry de producción según IaC (rama helm): ingress registry.ceedcv.es →
+  # backend 172.29.71.240:5000. Los nodos k3s lo resuelven vía registries.yaml.
+  registry: registry.ceedcv.es       # registry OCI interno
   repository: maya                   # <registry>/<repository>/<name>
   backend:
     name: maya-dashboard-backend
@@ -22,8 +24,35 @@ image:
     name: maya-dashboard-frontend
     pullPolicy: IfNotPresent
   tag: ""                            # se sobreescribe con --set image.tag=<sha>
+  # Secret para pull desde el registry. Creado fuera del chart:
+  #   kubectl -n maya-dashboard create secret docker-registry regcred \
+  #     --docker-server=registry.ceedcv.es --docker-username=<u> --docker-password=<t>
   pullSecrets:
     - name: regcred                  # creado en `kubectl create secret docker-registry`
+
+# ─── Vault (inyección de secretos según IaC) ──────────────────────────────
+# El Vault Agent Injector (namespace vault-system) renderiza
+# secret/data/maya-dashboard en /vault/secrets/config y el entrypoint hace
+# `source`. Requisitos operativos:
+#   1. `vault kv put secret/maya-dashboard APP_KEY=... DB_PASSWORD=... ...`
+#   2. El rol `vault-k8s-role` debe autorizar la SA `default` del namespace
+#      maya-dashboard.
+# Con vault.enabled=false se vuelve al Secret k8s clásico (secret.* de abajo).
+vault:
+  enabled: true
+  role: vault-k8s-role
+  secretPath: secret/data/maya-dashboard
+  # Claves leídas desde Vault (deben existir en secret/data/maya-dashboard).
+  keys:
+    - APP_KEY
+    - DB_USERNAME
+    - DB_PASSWORD
+    - REDIS_PASSWORD
+    - RABBITMQ_PASSWORD
+    - KEYCLOAK_CLIENT_SECRET
+    - REVERB_APP_KEY
+    - REVERB_APP_SECRET
+    - LOG_MGMT_DB_PASSWORD
 
 # ─── Backend (API HTTP) ─────────────────────────────────────────────────────
 backend:
@@ -148,7 +177,9 @@ ingress:
   tls:
     enabled: true
     secretName: dashboard-tls        # cert de la CA interna (montado o cert-manager)
-  annotations: {}
+  annotations:
+    # CA interna del clúster (ClusterIssuer definido en IaC cert-manager-ca.yaml).
+    cert-manager.io/cluster-issuer: maya-internal-ca
 
 # ─── Storage (PVC RWX — DESHABILITADO: dashboard no persiste ficheros) ─────
 storage:
@@ -196,22 +227,23 @@ config:
   QUEUE_CONNECTION: rabbitmq
   CACHE_STORE: redis
 
+  # Redis in-cluster (release redis-cache del maya-app chart en IaC).
   REDIS_CLIENT: phpredis
-  REDIS_HOST: "redis-master.redis.svc.cluster.local"
+  REDIS_HOST: "redis-cache-maya-app.maya-infra.svc.cluster.local"
   REDIS_PORT: "6379"
 
-  # ─── RabbitMQ in-cluster ──────────────────────────────────────────────────
-  RABBITMQ_HOST: "rabbitmq.rabbitmq.svc.cluster.local"
+  # ─── RabbitMQ in-cluster (release rabbitmq en namespace maya-sync) ─────────
+  RABBITMQ_HOST: "rabbitmq-maya-app.maya-sync.svc.cluster.local"
   RABBITMQ_PORT: "5672"
   RABBITMQ_USER: maya_dashboard
   RABBITMQ_VHOST: "/maya"
   MAYA_MESSAGING_APP: maya-dashboard
 
-  # ─── Keycloak (realm maya) ────────────────────────────────────────────────
-  KEYCLOAK_URL: "http://keycloak.keycloak.svc.cluster.local:8080"
+  # ─── Keycloak (realm maya; release keycloak en namespace maya-iam) ────────
+  KEYCLOAK_URL: "http://keycloak-maya-app.maya-iam.svc.cluster.local:8080"
   KEYCLOAK_REALM: maya
   KEYCLOAK_CLIENT_ID: maya-dashboard-backend
-  JWKS_URL: "http://keycloak.keycloak.svc.cluster.local:8080/realms/maya/protocol/openid-connect/certs"
+  JWKS_URL: "http://keycloak-maya-app.maya-iam.svc.cluster.local:8080/realms/maya/protocol/openid-connect/certs"
   JWT_ISSUER: "https://keycloak.ceedcv.es/realms/maya"
   JWT_AUDIENCE: "maya-dashboard-backend,maya-audit,maya-dms,maya-logs"
   JWKS_CACHE_TTL: "3600"
@@ -264,6 +296,12 @@ config:
 #     --from-literal=LOG_MGMT_DB_PASSWORD=<...>
 secret:
   name: maya-dashboard-secret
+  # Fallback sin Vault (`vault.enabled=false`): el chart puede renderizar un
+  # Secret stub con placeholders SOLO para dry-run/CI. `allowPlaceholders=true`
+  # (o el legacy `createStub=true`) activa esa plantilla; en prod real se crea el
+  # Secret fuera del chart (kubectl / Sealed Secrets) y NUNCA se activa esto.
+  allowPlaceholders: false
+  createStub: false
   # Keys esperadas en el Secret (sólo para documentación y validación; el chart
   # las referencia con secretKeyRef explícitos en el deployment).
   expectedKeys:
@@ -316,18 +354,23 @@ networkPolicy:
       namespace: monitoring
       ports: [8000]                  # backend /metrics; ampliar si reverb expone
   # Egress: DB Patroni, Redis, RabbitMQ, Keycloak, DNS. Sin salida a internet.
+  # DNS este-oeste (según IaC): Redis → maya-infra, RabbitMQ → maya-sync,
+  # Keycloak → maya-iam.
   allowedEgress:
     dns: true
     patroniCidr: "172.29.71.252/32"
-    keycloakNamespace: keycloak
-    rabbitmqNamespace: rabbitmq
-    redisNamespace: redis
+    keycloakNamespace: maya-iam       # release keycloak (keycloak-maya-app)
+    rabbitmqNamespace: maya-sync      # release rabbitmq (rabbitmq-maya-app)
+    redisNamespace: maya-infra        # release redis-cache (redis-cache-maya-app)
     # East-west: otros servicios Maya a los que dashboard puede llamar
-    # (introspección, SSO relay). Lista vacía = sin egress east-west.
-    mayaNamespaces: []
-    # Ejemplo:
-    #   - maya-authorization
-    #   - maya-audit
-    #   - maya-logs
-    #   - maya-dms
+    # (introspección, SSO relay). Se incluyen los namespaces de infra/sync/iam
+    # más los servicios Maya que dashboard consume.
+    mayaNamespaces:
+      - maya-infra
+      - maya-sync
+      - maya-iam
+      - maya-authorization
+      - maya-audit
+      - maya-logs
+      - maya-dms
 

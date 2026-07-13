@@ -19,6 +19,18 @@ ROLE="${CONTAINER_ROLE:-${1:-api}}"
 
 cd /var/www/html
 
+# ─── Secretos vía Vault Agent Injector (si el sidecar/init los inyectó) ───────
+# El Vault Agent escribe /vault/secrets/config con líneas `export VAR="..."`.
+# Lo cargamos ANTES de cachear config para que artisan vea las credenciales
+# (APP_KEY, DB_PASSWORD, LOG_MGMT_DB_PASSWORD, KEYCLOAK_CLIENT_SECRET, ...). Sin
+# fichero (dev / Secret k8s clásico), este bloque es un no-op y la env llega por
+# envFrom.
+if [ -f /vault/secrets/config ]; then
+    set -a
+    . /vault/secrets/config
+    set +a
+fi
+
 # Asegurar que los dirs writable existan (en K3s vienen de emptyDir).
 mkdir -p \
     storage/framework/cache/data \

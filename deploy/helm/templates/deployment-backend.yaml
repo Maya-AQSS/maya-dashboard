@@ -21,6 +21,7 @@ spec:
         {{- include "maya-dashboard.componentSelector" (dict "Release" .Release "Chart" .Chart "Values" .Values "component" "backend") | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- include "maya-dashboard.vaultAnnotations" . | nindent 8 }}
         {{- with .Values.backend.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

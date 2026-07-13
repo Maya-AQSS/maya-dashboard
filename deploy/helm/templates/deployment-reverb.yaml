@@ -19,6 +19,7 @@ spec:
         {{- include "maya-dashboard.componentSelector" (dict "Release" .Release "Chart" .Chart "Values" .Values "component" "reverb") | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- include "maya-dashboard.vaultAnnotations" . | nindent 8 }}
     spec:
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:

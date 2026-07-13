@@ -22,6 +22,8 @@ spec:
     metadata:
       labels:
         {{- include "maya-dashboard.componentSelector" (dict "Release" .Release "Chart" .Chart "Values" .Values "component" "migrate") | nindent 8 }}
+      annotations:
+        {{- include "maya-dashboard.vaultAnnotations" . | nindent 8 }}
     spec:
       restartPolicy: Never
       {{- with .Values.image.pullSecrets }}
@@ -39,6 +41,10 @@ spec:
             - |
               set -euo pipefail
               cd /var/www/html
+              # Secretos vía Vault Agent (source-once); no-op sin el fichero.
+              if [ -f /vault/secrets/config ]; then
+                set -a; . /vault/secrets/config; set +a
+              fi
               echo "[migrate] config:cache"
               php artisan config:cache
               echo "[migrate] running migrate --force --no-interaction"

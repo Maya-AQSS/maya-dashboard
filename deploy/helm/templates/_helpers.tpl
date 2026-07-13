@@ -62,13 +62,42 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
-{{/* envFrom estándar (config + secret) para todos los pods backend. */}}
+{{/* envFrom estándar (config + secret) para todos los pods backend.
+     Con `vault.enabled=true` los secretos llegan por fichero
+     /vault/secrets/config (lo carga el entrypoint / el hook inline del Job),
+     así que NO se monta el secretRef. */}}
 {{- define "maya-dashboard.envFrom" -}}
 - configMapRef:
     name: {{ include "maya-dashboard.fullname" . }}-config
+{{- if not .Values.vault.enabled }}
 - secretRef:
     name: {{ .Values.secret.name }}
     optional: false
+{{- end }}
+{{- end -}}
+
+{{/*
+Anotaciones para el Vault Agent Injector (según IaC: rama helm del repo IaC).
+El init container de Vault renderiza secret/data/maya-dashboard en
+/vault/secrets/config como líneas `export VAR="..."`; el entrypoint de
+producción hace `source`. `agent-pre-populate-only` evita el sidecar
+persistente: los secretos se cargan en el arranque (source-once), coherente con
+readOnlyRootFilesystem. Se inyecta en las anotaciones de pod de cada workload
+que corre la imagen backend (backend/worker/scheduler/reverb/migrate).
+*/}}
+{{- define "maya-dashboard.vaultAnnotations" -}}
+{{- if .Values.vault.enabled -}}
+vault.hashicorp.com/agent-inject: "true"
+vault.hashicorp.com/agent-pre-populate-only: "true"
+vault.hashicorp.com/role: {{ .Values.vault.role | quote }}
+vault.hashicorp.com/agent-inject-secret-config: {{ .Values.vault.secretPath | quote }}
+vault.hashicorp.com/agent-inject-template-config: |
+{{ printf "  {{- with secret %s -}}" (.Values.vault.secretPath | quote) }}
+{{- range .Values.vault.keys }}
+{{ printf "  export %s=\"{{ .Data.data.%s }}\"" . . }}
+{{- end }}
+{{ printf "  {{- end -}}" }}
+{{- end -}}
 {{- end -}}
 
 {{/* Volúmenes writable (tmpfs / emptyDir) requeridos por readOnlyRootFilesystem. */}}
